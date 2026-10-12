@@ -159,7 +159,7 @@ if sys.argv[1] != "completion":
     // POSIX shells use different nonzero statuses for a denied redirection.
     // Require a normal command failure, not a timeout, signal or authority stop.
     expect(write).toMatchObject({ exitCode: expect.any(Number), signal: null, stopped: null });
-    expect(write.exitCode).toBeGreaterThan(0);
+    expect((write as Record<string, unknown>).exitCode).toBeGreaterThan(0);
     expect(await readFile(secret, "utf8")).toBe("PRIVATE");
   });
   it.skipIf(!workspaceCommandSandboxAvailable())("stops its owned process on authority loss and bounds output", async () => {
