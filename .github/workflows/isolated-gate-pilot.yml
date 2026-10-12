@@ -1,0 +1,26 @@
+name: Isolated gate environment pilot
+on:
+  push:
+    branches: [verify/pipeline-gate-environment]
+permissions:
+  contents: read
+jobs:
+  environment:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Verify existing runner confinement and namespaces
+        shell: bash
+        run: |
+          set -euo pipefail
+          command -v bwrap || { sudo apt-get update; sudo apt-get install --no-install-recommends -y bubblewrap; }
+          df -h
+          test "$(df --output=avail -B1 "$RUNNER_TEMP" | sed -n '2p')" -gt 4294967296
+          python3 - <<'PY'
+          import pathlib,subprocess,tempfile
+          w=pathlib.Path(tempfile.mkdtemp(prefix='gate-pilot-',dir='/home/runner/work/_temp'))
+          (w/'tmp').mkdir()
+          for name,text in {'passwd':'paperclip:x:1000:1000:Isolated:/work:/bin/sh\n','group':'paperclip:x:1000:\n','hosts':'127.0.0.1 localhost\n'}.items(): (w/name).write_text(text)
+          cmd=['bwrap','--unshare-user','--uid','1000','--gid','1000','--unshare-pid','--unshare-ipc','--unshare-uts','--unshare-cgroup','--unshare-net','--die-with-parent','--new-session','--ro-bind','/usr','/usr','--tmpfs','/usr/local','--ro-bind','/lib','/lib','--ro-bind','/lib64','/lib64','--symlink','usr/bin','/bin','--proc','/proc','--dev','/dev','--tmpfs','/root','--dir','/etc','--ro-bind',str(w/'passwd'),'/etc/passwd','--ro-bind',str(w/'group'),'/etc/group','--ro-bind',str(w/'hosts'),'/etc/hosts','--bind',str(w),'/work','--bind',str(w/'tmp'),'/tmp','--clearenv','--setenv','PATH','/usr/bin:/bin','--setenv','HOME','/work','--','/bin/sh','-c','id; cat /proc/self/attr/current; bwrap --unshare-user --unshare-pid --unshare-net --ro-bind / / --proc /proc --dev /dev -- /bin/true']
+          p=subprocess.run(cmd);print('nested_namespace_probe_exit='+str(p.returncode),flush=True);raise SystemExit(p.returncode)
+          PY
