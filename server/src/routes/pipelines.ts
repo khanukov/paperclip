@@ -53,6 +53,7 @@ import {
   pipelines,
   routines,
 } from "@paperclipai/db";
+import { isUniqueViolation } from "../db-errors.js";
 import { validate } from "../middleware/validate.js";
 import { badRequest, conflict, forbidden, HttpError, notFound, unauthorized, unprocessable } from "../errors.js";
 import {
@@ -236,12 +237,8 @@ function extractIntakeFormFields(stage: typeof pipelineStages.$inferSelect | nul
   ];
 }
 
-function isPgUniqueViolation(error: unknown) {
-  return (error as { code?: unknown })?.code === "23505";
-}
-
 function codedConflictForUnique(error: unknown): never {
-  if (isPgUniqueViolation(error)) {
+  if (isUniqueViolation(error)) {
     throw conflict("Duplicate pipeline resource key", { code: "duplicate_key" });
   }
   throw error;

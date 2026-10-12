@@ -171,6 +171,100 @@ describeEmbeddedPostgres("pipeline routes", () => {
     isInstanceAdmin: true,
   };
 
+  it("returns duplicate_key for duplicate pipeline creation without changing the original", async () => {
+    const company = await seedCompany();
+    const http = request(app(boardActor));
+    const endpoint = `/api/companies/${company.id}/pipelines`;
+    const created = await http.post(endpoint).send({ key: "duplicate", name: "Original" }).expect(201);
+    const before = await http.get(`/api/pipelines/${created.body.id}`).expect(200);
+
+    const duplicate = await http.post(endpoint).send({ key: "duplicate", name: "Replacement" });
+
+    expect(duplicate.status).toBe(409);
+    expect(duplicate.body).toMatchObject({ code: "duplicate_key", details: { code: "duplicate_key" } });
+    const after = await http.get(`/api/pipelines/${created.body.id}`).expect(200);
+    expect(after.body).toEqual(before.body);
+    const rows = await db.select().from(pipelines).where(eq(pipelines.companyId, company.id));
+    expect(rows.map((row) => row.id)).toEqual([created.body.id]);
+    const stages = await db.select().from(pipelineStages);
+    expect(stages.map((stage) => stage.id).sort()).toEqual(created.body.stages.map((stage: { id: string }) => stage.id).sort());
+
+    const otherCompany = await seedCompany("Other company");
+    await http.post(`/api/companies/${otherCompany.id}/pipelines`).send({ key: "duplicate", name: "Other" }).expect(201);
+  });
+
+  it("returns duplicate_key for duplicate stage creation without changing stages", async () => {
+    const company = await seedCompany();
+    const http = request(app(boardActor));
+    const pipeline = await http.post(`/api/companies/${company.id}/pipelines`).send({ key: "stages", name: "Stages" }).expect(201);
+    const endpoint = `/api/pipelines/${pipeline.body.id}/stages`;
+    await http.post(endpoint).send({ key: "qa", name: "QA", kind: "working", position: 300 }).expect(201);
+    const before = await db.select().from(pipelineStages).orderBy(pipelineStages.id);
+
+    const duplicate = await http.post(endpoint).send({ key: "qa", name: "Replacement", kind: "working", position: 400 });
+
+    expect(duplicate.status).toBe(409);
+    expect(duplicate.body).toMatchObject({ code: "duplicate_key", details: { code: "duplicate_key" } });
+    expect(await db.select().from(pipelineStages).orderBy(pipelineStages.id)).toEqual(before);
+    const other = await http.post(`/api/companies/${company.id}/pipelines`).send({ key: "other", name: "Other" }).expect(201);
+    await http.post(`/api/pipelines/${other.body.id}/stages`).send({ key: "qa", name: "Other QA", kind: "working", position: 300 }).expect(201);
+  });
+
+  it("returns duplicate_key for a stage-key update collision and rolls back the patch", async () => {
+    const company = await seedCompany();
+    const http = request(app(boardActor));
+    const pipeline = await http.post(`/api/companies/${company.id}/pipelines`).send({ key: "update", name: "Update" }).expect(201);
+    const stage = pipeline.body.stages.find((row: { key: string }) => row.key === "intake");
+    const before = await db.select().from(pipelineStages).orderBy(pipelineStages.id);
+
+    const collision = await http.patch(`/api/pipelines/${pipeline.body.id}/stages/${stage.id}`)
+      .send({ key: "done", name: "Replacement", position: 450 });
+
+    expect(collision.status).toBe(409);
+    expect(collision.body).toMatchObject({ code: "duplicate_key", details: { code: "duplicate_key" } });
+    expect(await db.select().from(pipelineStages).orderBy(pipelineStages.id)).toEqual(before);
+    await http.patch(`/api/pipelines/${pipeline.body.id}/stages/${stage.id}`).send({ key: "renamed", name: "Renamed" }).expect(200);
+    const after = await db.select().from(pipelineStages).where(eq(pipelineStages.id, stage.id));
+    expect(after[0]).toMatchObject({ key: "renamed", name: "Renamed" });
+  });
+
+  it("returns duplicate_key for a duplicate case issue link without adding an event", async () => {
+    const company = await seedCompany();
+    const http = request(app(boardActor));
+    const pipeline = await http.post(`/api/companies/${company.id}/pipelines`).send({ key: "links", name: "Links" }).expect(201);
+    const created = await http.post(`/api/pipelines/${pipeline.body.id}/cases`).send({ caseKey: "linked", title: "Linked" }).expect(201);
+    const [issue] = await db.insert(issues).values({ companyId: company.id, title: "Work", status: "todo", priority: "medium" }).returning();
+    const endpoint = `/api/cases/${created.body.case.id}/issue-links`;
+    const link = await http.post(endpoint).send({ issueId: issue!.id, role: "work" }).expect(201);
+    const beforeLinks = await db.select().from(pipelineCaseIssueLinks).orderBy(pipelineCaseIssueLinks.id);
+    const beforeEvents = await db.select().from(pipelineCaseEvents).orderBy(pipelineCaseEvents.id);
+
+    const duplicate = await http.post(endpoint).send({ issueId: issue!.id, role: "origin" });
+
+    expect(duplicate.status).toBe(409);
+    expect(duplicate.body).toMatchObject({ code: "duplicate_key", details: { code: "duplicate_key" } });
+    expect(await db.select().from(pipelineCaseIssueLinks).orderBy(pipelineCaseIssueLinks.id)).toEqual(beforeLinks);
+    expect(await db.select().from(pipelineCaseEvents).orderBy(pipelineCaseEvents.id)).toEqual(beforeEvents);
+    expect(beforeLinks[0]).toMatchObject({ id: link.body.id, role: "work" });
+    const otherCase = await http.post(`/api/pipelines/${pipeline.body.id}/cases`).send({ caseKey: "other", title: "Other" }).expect(201);
+    await http.post(`/api/cases/${otherCase.body.case.id}/issue-links`).send({ issueId: issue!.id, role: "work" }).expect(201);
+  });
+
+  it("preserves foreign-key errors during pipeline creation without leaving resources", async () => {
+    const company = await seedCompany();
+    const http = request(app(boardActor));
+    const endpoint = `/api/companies/${company.id}/pipelines`;
+
+    const failed = await http.post(endpoint).send({ key: "foreign-key", name: "Invalid project", projectId: randomUUID() });
+
+    expect(failed.status).toBe(500);
+    expect(failed.body).toEqual({ error: "Internal server error" });
+    expect(await db.select().from(pipelines)).toEqual([]);
+    expect(await db.select().from(pipelineStages)).toEqual([]);
+    expect(await db.select().from(pipelineTransitions)).toEqual([]);
+    await http.post(endpoint).send({ key: "foreign-key", name: "Valid" }).expect(201);
+  });
+
   it("exposes the pipeline and case route surface", async () => {
     const company = await seedCompany();
     const http = request(app(boardActor));
