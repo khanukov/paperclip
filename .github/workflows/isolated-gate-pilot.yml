@@ -6,7 +6,7 @@ permissions:
   contents: read
 jobs:
   environment:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-22.04
     timeout-minutes: 10
     steps:
       - name: Verify existing runner confinement and namespaces
