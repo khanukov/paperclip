@@ -212,6 +212,10 @@ describe("managed GitHub launcher environment", () => {
   it("preserves local host credential helpers and validates worktree metadata", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "paperclip-host-git-")); roots.push(root);
     vi.stubEnv("HOME", root);
+    // This host-mode fixture owns a synthetic HOME and Git configuration.
+    // Do not inherit the verifier's global-config override into that fixture;
+    // afterEach restores it, and no real host credentials are made available.
+    vi.stubEnv("GIT_CONFIG_GLOBAL", undefined);
     vi.stubEnv("GH_TOKEN", "legacy-token");
     await writeFile(path.join(root, ".gitconfig"), '[credential]\n  helper = store\n');
     await exec("git", ["init", path.join(root, "repo")]);

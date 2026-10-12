@@ -52,6 +52,7 @@ import {
   retainedNativeCleanupJournalMatches,
 } from "./native-session-executor.js";
 import * as publicationSignals from "../chat-publication-reconciliation.js";
+import * as runnerRuntime from "../../vendor/paperclip-runner/index.js";
 import { PaperclipControlPlanePort } from "./paperclip-control-plane-port.js";
 import {
   LIST_CHAT_ATTACHMENTS_TOOL_DEFINITION,
@@ -729,6 +730,7 @@ const recoveryFakeCodex = resolve(
     const scratch = await mkdtemp(join(tmpdir(), "native-damaged-resume-"));
     const stateBase = join(scratch, "sessions");
     const bin = join(scratch, "bin");
+    const command = join(bin, "codex");
     const workspace = join(scratch, "workspace");
     const sourceHome = join(scratch, "source-home");
     const previousStateBase = process.env.PAPERCLIP_RUNNER_STATE_DIR;
@@ -744,7 +746,18 @@ const recoveryFakeCodex = resolve(
       if (runnerDiagnostics.length > 32) runnerDiagnostics.shift();
     };
     process.env.PAPERCLIP_RUNNER_STATE_DIR = stateBase;
+    // The default resolver prefers the installed dependency over PATH. Pin the
+    // existing synthetic provider at the transport boundary, while keeping the
+    // actual daemon, driver, authority rotation and database composition real.
+    const createTransport = runnerRuntime.createRunnerdCodexTransport;
+    let restoreFixtureTransport: (() => void) | undefined;
     try {
+      const fixtureTransport = vi.spyOn(runnerRuntime, "createRunnerdCodexTransport");
+      restoreFixtureTransport = () => fixtureTransport.mockRestore();
+      fixtureTransport.mockImplementation((options = {}) => {
+        expect(options.provider).toBe("codex");
+        return createTransport({ ...options, codexCommand: command });
+      });
       await Promise.all(
         [bin, workspace, sourceHome].map((path) =>
           mkdir(path, { recursive: true }),
@@ -753,7 +766,6 @@ const recoveryFakeCodex = resolve(
       // Only the provider boundary is synthetic; driver, runnerd, authority
       // rotation, prior-owner DB checks and archive/replacement are real.
       const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
-      const command = join(bin, "codex");
       await writeFile(
         command,
         `#!/bin/sh\nexec ${quote(process.execPath)} ${quote(recoveryFakeCodex)} "$CODEX_HOME/fake-state.json" 16\n`,
@@ -1222,6 +1234,7 @@ const recoveryFakeCodex = resolve(
     } finally {
       // onSession(null) quarantines the runtime owner before close finishes;
       // keep every published handle so an assertion/error cannot lose cleanup.
+      restoreFixtureTransport?.();
       if (firstSession) ownedSessions.add(firstSession);
       const closed = await Promise.allSettled([...ownedSessions].map((session) =>
         Promise.resolve().then(() => session.close({ reason: "Recovery fixture cleanup" })),
